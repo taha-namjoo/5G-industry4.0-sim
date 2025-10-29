@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# DRL Data Generation Script with Bursty Traffic for URLLC
-# Based on your script, modified for mMTC (fixed) and URLLC (bursty with variable burst rates)
+# DRL Data Generation Script with Bursty Traffic for URLLC (Fixed Version)
+# 200s total: 50s fixed 8Mbps + 20s burst 16Mbps (repeating cycles)
 
 # Configuration parameters
 UE1_IP="10.201.1.100"  # UE1: mMTC slice (fixed low traffic)
@@ -9,14 +9,13 @@ UE2_IP="10.202.1.100"  # UE2: URLLC slice (base + bursts)
 SERVER_IP="192.168.70.129"  # Core network IP
 DATA_DIR="./drl_training_data_bursty"
 LOG_DIR="./logs_bursty"
-TOTAL_DURATION=300  # 5 minutes total run
-BURST_INTERVAL=30   # Burst every 30 seconds
-BURST_DURATION=5    # Burst lasts 5 seconds
-MMTC_RATE=5M        # Fixed 5Mbps for mMTC
-URLLC_BASE_RATE=10M # Base 10Mbps for URLLC
-URLLC_BURST_MIN=50  # Min burst rate in Mbps
-URLLC_BURST_MAX=150 # Max burst rate in Mbps
-SAMPLING_INTERVAL=0.1  # 100ms intervals
+TOTAL_DURATION=200  # 200 seconds total run
+CYCLE_FIXED=50      # 50 seconds fixed bitrate for URLLC
+BURST_DURATION=20   # 20 seconds burst duration
+URLLC_BASE_RATE="8M"  # Fixed 8Mbps for URLLC base
+URLLC_BURST_RATE="16M" # Burst rate 16Mbps (2x base rate)
+MMTC_RATE="2M"      # Fixed 2Mbps for mMTC
+SAMPLING_INTERVAL=0.1  # 100ms intervals for stats
 
 # Create directories
 mkdir -p $DATA_DIR
@@ -44,7 +43,7 @@ collect_stats() {
     local experiment_id=$1
     local timestamp=$(date +%s)
     
-    echo "Collecting stats for Experiment: $experiment_id"
+    echo "Collecting stats for Experiment $experiment_id"
     
     local output_file="$DATA_DIR/experiment_${experiment_id}.csv"
     
@@ -71,16 +70,17 @@ collect_stats() {
         local urllc_jitter=$(echo $urllc_metrics | cut -d',' -f2)
         local urllc_packet_loss=$(echo $urllc_metrics | cut -d',' -f3)
         
-        # Detect if in burst (based on time)
+        # Detect if in burst (based on time: every 70s cycle = 50s fixed + 20s burst)
         local elapsed=$(($(date +%s) - start_time))
+        local cycle_pos=$((elapsed % 70))  # 70s cycle (50 fixed + 20 burst)
         local is_burst=0
-        local urllc_rate="10"
-        if [ $((elapsed % BURST_INTERVAL)) -lt $BURST_DURATION ]; then
+        local urllc_rate="8"  # Base rate 8 Mbps (corrected!)
+        if [ $cycle_pos -ge 50 ] && [ $cycle_pos -lt 70 ]; then  # 50-69s in cycle = burst
             is_burst=1
-            urllc_rate="variable (50-150)"
+            urllc_rate="16"  # Burst rate 16 Mbps (corrected!)
         fi
         
-        echo "$current_time,5,${urllc_rate},${mmtc_throughput},${urllc_throughput},${mmtc_latency},${urllc_latency},${mmtc_jitter},${urllc_jitter},${mmtc_packet_loss},${urllc_packet_loss},${is_burst}" >> $output_file
+        echo "$current_time,2,${urllc_rate},${mmtc_throughput},${urllc_throughput},${mmtc_latency},${urllc_latency},${mmtc_jitter},${urllc_jitter},${mmtc_packet_loss},${urllc_packet_loss},${is_burst}" >> $output_file
         
         sleep $SAMPLING_INTERVAL
     done
@@ -89,6 +89,10 @@ collect_stats() {
 # Function to parse iperf results (expanded)
 parse_iperf_results() {
     local log_file=$1
+    if [ ! -f "$log_file" ]; then
+        echo "0,0,0"
+        return
+    fi
     local throughput=$(grep "receiver" $log_file | awk '{print $7}' | tail -1 || echo "0")
     local jitter=$(grep "ms" $log_file | awk '{print $9}' | tail -1 || echo "0")
     local packet_loss=$(grep "receiver" $log_file | awk '{print $12}' | tail -1 || echo "0")
@@ -96,29 +100,54 @@ parse_iperf_results() {
     echo "$throughput,$jitter,$packet_loss"
 }
 
-# Function to run experiment with bursty traffic
+# Function to run experiment with periodic bursty traffic
 run_experiment() {
     local experiment_id=$1
     
-    echo "=== Experiment $experiment_id: mMTC fixed 5Mbps, URLLC base 10Mbps + variable bursts (50-150Mbps) ==="
+    echo "=== Experiment $experiment_id: mMTC fixed 2Mbps, URLLC 8Mbps base + 16Mbps bursts (20s every 70s) ==="
     
-    # Start mMTC traffic (fixed)
-    ip netns exec ue1 iperf3 -c $SERVER_IP -p 5201 -t $TOTAL_DURATION -b $MMTC_RATE > $LOG_DIR/mmtc_exp${experiment_id}.log 2>&1 &
+    # Start mMTC traffic (fixed, continuous)
+    ip netns exec ue1 iperf3 -c $SERVER_IP -p 5201 -t $TOTAL_DURATION -b $MMTC_RATE -u > $LOG_DIR/mmtc_exp${experiment_id}.log 2>&1 &
     MMTC_PID=$!
     
-    # Start URLLC traffic with bursts (loop in background)
+    # Start URLLC traffic with periodic bursts (continuous stream, no gaps)
     (
         start_time=$(date +%s)
+        
+        # Run continuous iperf with dynamic rate adjustment
         while [ $(($(date +%s) - start_time)) -lt $TOTAL_DURATION ]; do
             elapsed=$(($(date +%s) - start_time))
-            if [ $((elapsed % BURST_INTERVAL)) -lt $BURST_DURATION ]; then
-                burst_rate=$((URLLC_BURST_MIN + RANDOM % (URLLC_BURST_MAX - URLLC_BURST_MIN + 1)))
-                rate="${burst_rate}M"
-            else
-                rate=$URLLC_BASE_RATE
+            remaining=$((TOTAL_DURATION - elapsed))
+            
+            if [ $remaining -le 0 ]; then
+                break
             fi
-            ip netns exec ue2 iperf3 -c $SERVER_IP -p 5202 -t 1 -b $rate
-            sleep 0.1  # No sleep, continuous
+            
+            cycle_pos=$((elapsed % 70))  # 70s cycle
+            
+            # Determine duration and rate for current phase
+            if [ $cycle_pos -ge 50 ]; then
+                # In burst phase (50-69s in cycle)
+                rate=$URLLC_BURST_RATE  # 16M
+                phase_remaining=$((70 - cycle_pos))  # Time left in burst
+                if [ $phase_remaining -gt $remaining ]; then
+                    duration=$remaining
+                else
+                    duration=$phase_remaining
+                fi
+            else
+                # In normal phase (0-49s in cycle)
+                rate=$URLLC_BASE_RATE  # 8M
+                phase_remaining=$((50 - cycle_pos))  # Time left in normal phase
+                if [ $phase_remaining -gt $remaining ]; then
+                    duration=$remaining
+                else
+                    duration=$phase_remaining
+                fi
+            fi
+            
+            # Run iperf for the calculated duration (continuous, no gaps)
+            ip netns exec ue2 iperf3 -c $SERVER_IP -p 5202 -t $duration -b $rate -u 2>&1
         done
     ) > $LOG_DIR/urllc_exp${experiment_id}.log 2>&1 &
     URLLC_PID=$!
@@ -137,22 +166,29 @@ run_experiment() {
 
 # Main execution
 main() {
-    echo "Starting Bursty Traffic Generation..."
+    echo "========================================"
+    echo "Starting Periodic Bursty Traffic Generation"
+    echo "Total Duration: 200s"
+    echo "Cycle: 50s base (8Mbps) + 20s burst (16Mbps) = 70s"
+    echo "mMTC: Fixed 2Mbps"
+    echo "========================================"
     
     start_iperf_server
     
     experiment_id=1
-    run_experiment $experiment_id  # Single experiment for simplicity; loop if needed
+    run_experiment $experiment_id  # Single experiment
     
     stop_iperf_server
     
+    echo "========================================"
     echo "Data generation completed!"
     echo "Generated data files are in: $DATA_DIR"
     echo "Log files are in: $LOG_DIR"
+    echo "========================================"
 }
 
 trap stop_iperf_server SIGINT SIGTERM
 
 main
 
-echo "Bursty traffic generation completed successfully!"
+echo "Periodic bursty traffic generation completed successfully!"
