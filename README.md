@@ -165,7 +165,7 @@ By default, **FlexRIC** builds the nearRT-RIC with **E2AP v2** and **KPM v2**.
 If you need a different version, edit the variables `E2AP_VERSION` and `KPM_VERSION` inside FlexRIC's `CMakeLists.txt` file.
 
 > ⚠️ **Important:**  
-> The `E2AP_VERSION` and `KPM_VERSION` used by **OAI** and **FlexRIC** must match due to O-RAN version incompatibilities.
+> The `E2AP_VERSION` and `KPM_VERSION` used by **OAI** and **FlexRIC** must match due to O-RAN version incompatibilities. 
 
 ---
 
@@ -246,9 +246,11 @@ As per **O-RAN.WG3.E2SM-v02.00** specifications, UE ID (section 6.2.2.6) represe
 #### 3.3.1 Start the gNB-mono
 
 ```bash
+#Use this repo's gNB conf insted of orginal one
 cd <path-to>/build
 sudo ./nr-softmodem -O ../../../targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb.sa.band78.fr1.106PRB.usrpb210.conf --gNBs.[0].min_rxtxtime 6 --rfsim
 ```
+
 
 ---
 
